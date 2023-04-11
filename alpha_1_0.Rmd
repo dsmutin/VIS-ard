@@ -1,0 +1,463 @@
+---
+title: котики рисуют графики
+runtime: shiny
+output: html_document
+---
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = F, include = T)
+
+liblist <- c("tidyverse", "readxl", "ggThemeAssist", "shiny", "ggthemes")       #список библиотек
+
+for (i in 1:length(liblist)) {
+  if (!require(liblist[i], quietly = TRUE, character.only = T)) 
+    install.packages(liblist[i])                                                #установка недостающих библиотек
+  library(liblist[i], character.only = T)                                       #подгружение библиотек
+  
+  print(str_c("Package ", liblist[i], " run"))
+}
+
+rm (i, liblist)  
+```
+
+```{r UI functions, include = F}
+
+```
+
+```{r UX functions, include = F}
+varf <- function(df, varc, do = F) {
+  X <- df[, varc]
+  X <- unlist(X)
+  if (do == T)
+    X <- as.character(X) else
+    X <- as.numeric(X)
+  return(X)
+}
+
+laes <- function(df, varc) {
+  if (varc == "-") NULL else
+  unlist(df[,varc])
+}
+
+larg <- function(varc) {
+  if (varc == "") NULL else
+  varc
+}
+
+ecp <- function(...) eval(call(paste0(...)))
+ec  <- function(...) eval(call(       ... ))
+```
+
+```{r UI vars, include = F}
+coord <-      c("cartesian", "fixed", "trans", "flip", "sf", "polar")
+
+scales <-     c("fixed", "free", "free_x", "free_y")
+
+theme_list <- c("light","bw", "linedraw", "dark", "minimal", "classic",
+                "void", "test", "base", "economist", "few", "tufte",
+                "wsj", "solarized", "map")
+
+geoms_types_discr   <- c("точки или текст", "линии", "средние", "плотности", "ошибки", "простой")
+geoms_types_categor <- c("подсчет","средние", "ошибки", "простой")
+geoms_types_onevar  <- c("распределение", "простой")
+
+geoms_types_discr_list   <- list(c("point","label","text", "rug"),
+                                 c("area", "line", "step"),
+                                 c("quantile", "smooth"),
+                                 c("bin2d", "density_2d", "hex", "contour_filled", "raster", "tile"),
+                                 c("crossbar", "errorbar", "linerange", "pointrange"),
+                                 c("blank","abline", "curve", "ribbon", "polygon", "path"))
+
+geoms_types_categor_list <- list(c("col", "count", "jitter"),
+                                 c("violin","boxplot", "dotplot"),
+                                 c("crossbar", "errorbar", "linerange", "pointrange"), 
+                                 c("blank","abline", "curve", "ribbon", "polygon", "path"))
+
+geoms_types_onevar_list  <- list(c("bar","area", "density", "dotplot", "freqpoly", "histogram"),
+                                 c("blank","abline", "curve", "ribbon", "polygon", "path"))
+
+geoms_simple  <-  c("blank","abline", "curve", "ribbon", "polygon", "path")
+
+smooth_methods <- c("loess","glm", "gam")
+
+positions <-      c("nudge", "dodge", "fill", "jitter", "stack")
+```
+
+```{r}
+##main  UI---------
+
+ui <- fluidPage(
+  
+  # загрузка ----
+    sidebarLayout(
+      sidebarPanel(
+        width = 5,
+      
+      # тестовые данные
+      checkboxInput("test", "Использовать тестовые данные", T),
+
+      # выбор файла
+      fileInput("file", label = "Данные в формате excel:", placeholder = "таблицу с котятами", multiple = F,
+                                      buttonLabel = "Загрузить"),
+
+      # заголовок
+      checkboxInput("header", "Заголовок", TRUE),
+      
+      # страница
+      numericInput("page", label = "Номер страницы:", value = 1, min = 1)
+    ),
+
+    # предпросмотр
+    mainPanel(
+      width = 5,
+      tableOutput("contents"),
+      tableOutput("contents_test"),
+    )
+  ),
+  
+  # основные спецификации ----
+  uiOutput("mainUI"),
+  plotOutput("coord_plot"),
+  
+  # слои ----
+  tags$hr(),
+  sidebarLayout(
+    sidebarPanel(width = 7,
+      fluidRow(column(6, uiOutput("layer_geom1")),
+               column(6, uiOutput("layer_geom2"))),
+      uiOutput("layer"),
+    ), 
+    mainPanel(width = 5,
+      uiOutput("geom_methods"),
+      plotOutput('layer_plot', height = 300),
+      uiOutput("interplotUI"),
+      plotOutput('sumlayer_plot', height = 300)
+    )
+  ),
+  
+  # редактор слоев ----
+  tags$hr(),
+  
+  # темы ----
+  tags$hr(),
+  
+  # предустановленные темы
+  uiOutput("preset_themes"),
+  
+  # финальный график ----
+  tags$hr(),
+  h2("Финальный график в текущем виде:"),
+  plotOutput("final_plot"),
+  
+  # сохранение графика ----
+  
+  # test ----
+  if(F){
+    fluidPage(
+      uiOutput("test1"),
+      tableOutput("test2"),
+      textOutput("test3"),
+      actionButton("stop", "stop")
+    )
+  }
+)
+
+#-------------------------------------------------------------------------------------------------------------------
+
+
+#сервер ----
+
+server <- function(input, output) {
+  
+  # работа с данными ----
+  # датафрэйм
+  dfl     <- reactiveValues(data = NULL)
+  gglayer <- reactiveValues(data = NULL)
+  #ахахах проблемы для будущего дани
+  ggfull  <- reactiveValues(data = NULL)
+  
+  # загрузка
+  observeEvent(req(input$file), {
+    dfl$data <- as.data.frame(
+      read_excel(input$file$datapath, sheet = input$page, col_names = input$header))
+  })
+  
+  # тестовый файл
+  observeEvent(req(input$test), {
+    dfl$data <- diamonds
+  })
+  
+  
+  # предпросмотр файла
+  output$contents <- renderTable({
+    if(is.null(dfl$data)) return()
+    vr <<- as.character(names(dfl$data))
+    head(dfl$data)
+  })
+
+  # основные спецификации ----
+  
+  output$mainUI <- renderUI({
+    if(is.null(dfl$data)) return()
+    fluidPage(
+      fluidRow(
+        column(2, selectInput("coord", label = "Координаты", choices = coord)),
+        column(3, selectInput('xcol', 'X :', vr)),
+        column(3, selectInput('ycol', 'Y :', vr, vr[2])),
+        column(2, actionButton('only_x', "Только X", icon = icon("paw", "fa-3x"))),
+        column(2, actionButton('only_y', "Только Y", icon = icon("paw", "fa-3x")))
+      ),
+      fluidRow(
+        column(2),
+        column(3, checkboxInput('x_chr', "Х - категориальная")),
+        column(3, checkboxInput('y_chr', "Y - категориальная"))
+      ),
+      tags$hr(),
+      fluidRow(
+        column(2, h4("Разбить на подграфики:")),
+        column(3, selectInput('y_grid', 'Столбцы:', c(".", vr))),
+        column(3, selectInput('x_grid', 'Строки: ', c(".", vr))),
+        column(3, selectInput('scale_grid', 'Шкалы: ', scales))
+      )
+    )
+  })
+  
+  # иллюстрация стартового графика ----
+  output$coord_plot <- renderPlot({
+    if(is.null(dfl$data)) return()
+    X <<- varf(dfl$data, input$xcol, input$x_chr)
+    Y <<- varf(dfl$data, input$ycol, input$y_chr)
+    
+    #только X
+    if(input$only_x %%2 == 1) {
+      gg <<- ggplot(dfl$data, aes(x = X)) +
+        xlab(input$xcol) +
+        ylab(input$ycol) +
+        ecp("coord_", input$coord) +
+        facet_grid(str2lang(paste0(input$x_grid, "~", input$y_grid))) +
+        theme_light()
+      ggful <<- gg
+      return (gg + geom_bar())
+    }
+    #только Y
+    if(input$only_y %%2 == 1) {
+      gg <<- ggplot(dfl$data, aes(y = Y)) +
+        xlab(input$xcol) +
+        ylab(input$ycol) +
+        ecp("coord_", input$coord) +
+        facet_grid(str2lang(paste0(input$x_grid, "~", input$y_grid))) +
+        theme_light()
+      ggful <<- gg
+      return (gg + geom_bar())
+    }
+    #X и Y
+      gg <<- ggplot(dfl$data, aes(X,Y)) +
+        xlab(input$xcol) +
+        ylab(input$ycol) +
+        facet_grid(str2lang(paste0(input$x_grid, "~", input$y_grid))) +
+        ecp("coord_", input$coord) +
+        theme_light()
+      ggful <<- gg
+      return (gg + geom_point(alpha = 0.3))
+  })
+  
+  # слои графика
+  # выбор geoms ----
+  output$layer_geom1 <- renderUI({
+    if(is.null(dfl$data)) return()
+    fluidPage(
+      #DEBUG IN FUTURE!!!!!!!!!!! если неправильно прощелкать то тут все сломается
+      if(input$only_x %%2 == 1 | input$only_y %%2 == 1) {
+        selectInput('layer_geom_types', "Выбор типа", geoms_types_onevar)
+      } else
+      if(input$x_chr == T | input$y_chr == T ) {
+        selectInput('layer_geom_types', "Выбор типа", geoms_types_categor)
+      } else {
+        selectInput('layer_geom_types', "Выбор типа", geoms_types_discr)
+      }
+    )
+  })
+  
+  output$layer_geom2 <- renderUI({
+    if(is.null(dfl$data)) return()
+    fluidPage(
+      if(input$only_x %%2 == 1 | input$only_y %%2 == 1) {
+        r <- which(input$layer_geom_types == geoms_types_onevar)
+        selectInput('layer_geoms', "слой:", geoms_types_onevar_list[[r]])
+      } else
+      if(input$x_chr == T | input$y_chr == T ) {
+        r <- which(input$layer_geom_types == geoms_types_categor)
+        selectInput('layer_geoms', "слой:", geoms_types_categor_list[[r]])
+      } else {
+        r <- which(input$layer_geom_types == geoms_types_discr)
+        selectInput('layer_geoms', "слой:", geoms_types_discr_list[[r]])
+      }
+    )
+  })
+  
+  # спецификации слоя ----
+  output$layer <- renderUI({
+    if(is.null(dfl$data)) return()
+    fluidPage(
+      fluidRow(
+        column(3, h5("")),
+        column(4, h5("По переменной:")),
+        column(5, h5("Параметры:"))
+      ),
+      tags$hr(),
+      fluidRow(
+        column(3, h4("Цвет")),
+        column(4, selectInput('color_aes', NULL, c("-", vr))),
+        column(5, textInput('color', NULL, placeholder = "в #HTML"))
+      ),
+      fluidRow(
+        column(3, h4("Заливка")),
+        column(4, selectInput('fill_aes', NULL, c("-", vr))),
+        column(5, textInput('fill', NULL, placeholder = "в #HTML"))
+      ),
+      fluidRow(
+        column(3, h4("Форма")),
+        column(4, selectInput('shape_aes', NULL, c("-", vr))),
+        column(5, sliderInput('shape', NULL, min = 1, max = 25, value = 20, step = 1))
+      ),
+      fluidRow(
+        column(3, h4("Размер")),
+        column(4, selectInput('size_aes', NULL, c("-", vr))),
+        column(5, sliderInput('size', NULL, min = 0, max = 10, value = 1, step = 0.1))
+      ),
+      fluidRow(
+        column(3, h4("Штрихи")),
+        column(4, selectInput('linetype_aes', NULL, c("-", vr))),
+        column(5, sliderInput('linetype', NULL, min = 0, max = 6, value = 1, step = 1))
+      ),
+      fluidRow(
+        column(3, h4("Группировка")),
+        column(4, selectInput('group_aes', NULL, c("-", vr))),
+        column(5, selectInput('group', NULL, positions))
+      ),
+      fluidRow(
+        column(3, h4("Прозрачность")),
+        column(9, sliderInput('alpha', NULL, min = 0, max = 1, value = 0.5, step = 0.05))
+      ),
+      fluidRow(
+        column(3, h4("Ширина линии")),
+        column(9, sliderInput('linewidth', NULL, min = 0, max = 10, value = 1, step = 0.1))
+      ),
+      fluidRow(
+        column(12, actionButton('layer_done', "Добавить слой", icon = icon("paw", "fa-3x")))
+      )
+    )
+  })
+  
+  output$geom_methods <- renderUI({
+    if(input$layer_geoms == "smooth")
+      selectInput('method', "Метод усреднения", smooth_methods) else
+    if(input$layer_geoms %in% c("label", "text"))
+      selectInput('label_aes', "Буквы по переменной", vr) else
+    if(input$layer_geoms %in% c("contour_filled", "raster", "tile"))
+      h4("Не забудьте выбрать заливку") else
+    if(input$layer_geoms == "contour_filled")
+      selectInput('z_aes', "Заливка по контору", vr)
+  })
+  
+  #предпросмотр графиков ----
+  output$layer_plot <- renderPlot({
+    if(is.null(dfl$data)) return()
+    
+    #аргументы слоя
+    argl <- list(aes(color =    laes(dfl$data,input$color_aes), 
+                     shape =    laes(dfl$data, input$shape_aes),
+                     size =     laes(dfl$data, input$size_aes),
+                     fill =     laes(dfl$data, input$fill_aes),
+                     linetype = laes(dfl$data, input$linetype_aes),
+                     group =    laes(dfl$data, input$group_aes),
+                     label =                   input$label,
+                     z =                       input$z
+                     ),
+                 
+                     color =     larg(input$color),
+                     shape =     larg(input$shape),
+                     size =      larg(input$size),
+                     fill =      larg(input$fill),
+                     linetype =  larg(input$linetype),
+                     position =  larg(input$group),
+                     linewidth = larg(input$linewidth),
+                     alpha =     larg(input$alpha),
+                     method =         input$method
+                 )
+    
+    argl <- argl[!unlist(lapply(argl, is.null))]
+    
+    gglayer$data <- do.call(paste0("geom_", input$layer_geoms), args = argl)
+    
+    ggful <<- ggful + gglayer$data
+    return(gg + gglayer$data + theme(legend.position = "bottom"))
+  })
+  
+  
+  output$interplotUI <- renderUI({
+    if(is.null(dfl$data)) return()
+    fluidPage(
+      tags$hr(),
+      h4("Предпросмотр всех слоев:")
+    )
+  })
+  
+  
+  output$sumlayer_plot <- renderPlot({
+    req(input$layer_done)
+    ggful
+  })
+  
+  # предпросмотр слоев и их удаление ----
+  
+  # внешний вид графика ----
+  #lims
+  #palletes???
+  #theme
+  
+  # предустановленные темы
+  output$preset_themes <- renderUI({
+    if(is.null(dfl$data)) return()
+    selectInput('pretheme', "Добавить тему:", choices = theme_list)
+  })
+  
+  # финальный график ----
+  output$final_plot <- renderPlot({
+    req(input$coord)
+    if(is.null(dfl$data)) return()
+    ggful <- ggful + ecp("theme_", input$pretheme)
+    ggful
+  })
+  
+  # test ----
+  output$test1 <- renderUI({
+    #for (i in 1:5) {
+    actionButton(paste0("t",1), paste0("t", 1))
+    #}
+  })
+  
+  output$test2 <- renderTable({
+    head(varf(dfl$data, input$xcol)[1:10])
+  })
+    
+  output$test3 <- renderText({
+    unlist(map(aesl,1))
+  })
+}
+#aesl
+
+# ну посмотрим
+shinyApp(ui, server, options = list(height = 3000))
+
+```
+
+```{r help, include = F}
+help_point <- ggplot(mapping = aes(x = 1:25, y = 1)) + 
+  geom_point(shape = 1:25, color = "blue", fill = "cadetblue") +
+  geom_text(mapping = aes(label = as.character(1:25)), nudge_y = 0.01) +
+  theme_void()
+help_point
+```
+
+
+
